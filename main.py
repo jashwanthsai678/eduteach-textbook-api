@@ -37,7 +37,8 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 _HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 
-_STORAGE_BUCKET = "textbook-assets"
+_LEGACY_PRIVATE_BUCKET = "textbook-assets"  # older pipeline's rows -- bare paths, private, needs a signed URL
+_PUBLIC_BUCKET_PREFIX = "textbook-images/"  # this project's own rows -- public bucket, direct URL works
 _SIGNED_URL_EXPIRY_SECONDS = 6 * 60 * 60  # 6 hours -- long enough for one real reading/generation session
 
 app = FastAPI(title="EduTeach Textbook Content API")
@@ -59,7 +60,7 @@ def _signed_storage_url(storage_path: str) -> str | None:
     bucket -- resolve it to a temporary signed URL, fresh every call, since
     these expire and must never be cached or stored as if permanent."""
     resp = requests.post(
-        f"{SUPABASE_URL}/storage/v1/object/sign/{_STORAGE_BUCKET}/{storage_path}",
+        f"{SUPABASE_URL}/storage/v1/object/sign/{_LEGACY_PRIVATE_BUCKET}/{storage_path}",
         headers={**_HEADERS, "Content-Type": "application/json"},
         json={"expiresIn": _SIGNED_URL_EXPIRY_SECONDS},
         timeout=30,
@@ -70,14 +71,28 @@ def _signed_storage_url(storage_path: str) -> str | None:
     return f"{SUPABASE_URL}/storage/v1{signed_path}" if signed_path else None
 
 
+def _public_storage_url(storage_path: str) -> str:
+    """storage_path already carries its own bucket prefix (e.g.
+    "textbook-images/book/ch01/img.jpg") -- that bucket is public, so no
+    signing needed, just a direct, permanent URL."""
+    return f"{SUPABASE_URL}/storage/v1/object/public/{storage_path}"
+
+
 def _resolve_image_url(img: dict) -> str | None:
-    """Exactly one of drive_file_id / storage_path is meaningful per row --
-    drive_file_id takes priority since it's cheap (no extra request);
-    storage_path (this project's OWN external:drive: placeholder rows,
-    or an empty string) never gets treated as a real Supabase path."""
+    """Three possible shapes per row, checked in order:
+    1. drive_file_id set -- legacy rows from before the Supabase Storage
+       migration, still served from Google Drive.
+    2. storage_path starting with "textbook-images/" -- this project's
+       current uploads, public bucket, permanent direct URL.
+    3. storage_path as a bare path -- the older (pre-existing) pipeline's
+       rows, private textbook-assets bucket, needs a fresh signed URL.
+    storage_path values starting with "external:" are this project's own
+    old Drive-placeholder rows and never resolve as a real Supabase path."""
     if img.get("drive_file_id"):
         return _drive_image_url(img["drive_file_id"])
     storage_path = img.get("storage_path") or ""
+    if storage_path.startswith(_PUBLIC_BUCKET_PREFIX):
+        return _public_storage_url(storage_path)
     if storage_path and not storage_path.startswith("external:"):
         return _signed_storage_url(storage_path)
     return None
