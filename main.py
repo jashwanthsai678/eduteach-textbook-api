@@ -32,6 +32,7 @@ import os
 
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -42,6 +43,17 @@ _PUBLIC_BUCKET_PREFIX = "textbook-images/"  # this project's own rows -- public 
 _SIGNED_URL_EXPIRY_SECONDS = 6 * 60 * 60  # 6 hours -- long enough for one real reading/generation session
 
 app = FastAPI(title="EduTeach Textbook Content API")
+
+# Everything this API serves is already public, read-only, published content --
+# no auth, no per-user data -- so an open CORS policy is appropriate rather than
+# an allowlist. Needed for the browser-based textbook-browser front-end (and any
+# future school-facing app) to call this directly from client-side JS.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 def _sb_get(table: str, **params):
