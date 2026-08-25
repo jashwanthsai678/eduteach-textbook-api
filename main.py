@@ -63,6 +63,23 @@ def _sb_get(table: str, **params):
     return resp.json()
 
 
+def _sb_count(table: str, **params) -> int:
+    """Exact row count via PostgREST's Prefer: count=exact -- returns the
+    count from the response's Content-Range header without fetching any
+    actual rows, so this is cheap even for a book with many chapters."""
+    headers = {**_HEADERS, "Prefer": "count=exact"}
+    resp = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=headers, params={**params, "select": "id", "limit": 1}, timeout=30)
+    if not resp.ok:
+        raise HTTPException(502, f"Supabase count failed: {resp.text}")
+    content_range = resp.headers.get("content-range", "")
+    if "/" not in content_range:
+        return 0
+    try:
+        return int(content_range.rsplit("/", 1)[-1])
+    except ValueError:
+        return 0
+
+
 def _drive_image_url(file_id: str) -> str:
     return f"https://drive.google.com/uc?export=view&id={file_id}"
 
@@ -117,10 +134,24 @@ async def root():
 
 @app.get("/published/books")
 async def list_published_books():
-    return _sb_get(
+    """chapter_count on the book row is the TOTAL the pipeline detected in
+    the PDF, set once up front -- it does NOT track how many chapters have
+    actually been published so far. Since chapters now publish one at a
+    time as they finish (rather than all at the end), a book that was
+    stopped or is still mid-run can genuinely have fewer real chapters than
+    that number. total_chapters/chapters_published here are reported
+    separately and honestly, computed live from the real chapter rows,
+    instead of presenting a partially-ingested book as if it were complete."""
+    books = _sb_get(
         "textbook_books",
-        select="book_id,board,grade,subject,language,chapter_count",
+        select="id,book_id,board,grade,subject,language,chapter_count",
     )
+    for b in books:
+        published = _sb_count("textbook_chapters", book_uuid=f"eq.{b['id']}")
+        b["total_chapters"] = b.pop("chapter_count")
+        b["chapters_published"] = published
+        b.pop("id", None)
+    return books
 
 
 @app.get("/published/books/{book_id}/chapters")
