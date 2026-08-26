@@ -282,15 +282,16 @@ async def get_published_chapter(book_id: str, chapter_number: int):
     )
     for img in images:
         img["url"] = _resolve_image_url(img)
+        img["caption"] = img.get("caption") or ""  # real rows from older ingestion runs can have this NULL
         img.pop("drive_file_id", None)
         img.pop("storage_path", None)
 
     return {
         "book_id": book_id,
         "chapter_number": chapter_number,
-        "chapter_title": chapter["chapter_title"],
+        "chapter_title": chapter["chapter_title"] or "",
         "page_start": chapter["page_start"],
         "page_end": chapter["page_end"],
-        "content": chapter["content_markdown"],
+        "content": chapter["content_markdown"] or "",
         "images": images,
     }
