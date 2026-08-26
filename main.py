@@ -31,8 +31,9 @@ Required environment variables:
 import os
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -54,6 +55,40 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+class BookSummary(BaseModel):
+    book_id: str = Field(..., description="Stable, deterministic ID built from board+grade+subject+language (e.g. 'ts_scert_class5_maths_en'). Use this to fetch chapters -- it can often be constructed directly without calling this endpoint first, see the root endpoint's 'tip'.")
+    board: str = Field(..., description="Education board, e.g. 'TS SCERT', 'CBSE'.")
+    grade: str = Field(..., description="Grade/class, e.g. '5'.")
+    subject: str = Field(..., description="Subject name, e.g. 'Maths'.")
+    language: str = Field(..., description="Language code, e.g. 'en'.")
+    total_chapters: int = Field(..., description="Total chapters detected in the source PDF.")
+    chapters_published: int = Field(..., description="Chapters actually published and servable right now. Can be less than total_chapters while a book is still being ingested -- check this before assuming the whole book is available.")
+
+
+class ChapterSummary(BaseModel):
+    chapter_number: int
+    chapter_title: str
+    page_start: int
+    page_end: int
+
+
+class ChapterImage(BaseModel):
+    image_id: str = Field(..., description="Matches an <img id=\"...\"/> placeholder in the chapter's content field.")
+    caption: str = Field(..., description="A text description of the image -- always present, even when the image itself couldn't be resolved to a URL.")
+    order_index: int
+    url: str | None = Field(None, description="Direct, fetchable image URL. Null only if resolving the storage location failed -- the caption still describes what the image shows.")
+
+
+class ChapterContent(BaseModel):
+    book_id: str
+    chapter_number: int
+    chapter_title: str
+    page_start: int
+    page_end: int
+    content: str = Field(..., description="Chapter text, noise-free, with <img id=\"...\"/> placeholders where images belong -- cross-reference each placeholder's id against the images list.")
+    images: list[ChapterImage]
 
 
 def _sb_get(table: str, **params):
@@ -129,11 +164,42 @@ def _resolve_image_url(img: dict) -> str | None:
 
 @app.get("/")
 async def root():
-    return {"service": "EduTeach Textbook Content API", "try": "/published/books"}
+    """Self-description for a script or agent that only has this API's base
+    URL and needs to figure out what's available without a human reading
+    separate documentation first. For the full machine-readable contract
+    (every field, every type), see /openapi.json; for a human-browsable
+    version of the same thing, see /docs (both generated automatically by
+    the framework, not hand-maintained here)."""
+    return {
+        "service": "EduTeach Textbook Content API",
+        "description": "Read-only REST API serving already-published, real textbook content (text and images) for grounding AI-generated teaching materials.",
+        "openapi_spec": "/openapi.json",
+        "interactive_docs": "/docs",
+        "endpoints": [
+            {
+                "method": "GET", "path": "/published/books",
+                "description": "List published textbooks, optionally filtered by board/grade/subject/language.",
+            },
+            {
+                "method": "GET", "path": "/published/books/{book_id}/chapters",
+                "description": "List one book's published chapters (titles, page ranges).",
+            },
+            {
+                "method": "GET", "path": "/published/books/{book_id}/chapters/{chapter_number}",
+                "description": "Get one chapter's full content: text plus every image resolved to a fetchable URL.",
+            },
+        ],
+        "tip": "book_id is deterministic, not random -- board.lower().replace(' ','_') + '_class' + grade + '_' + subject.lower().replace(' ','_') + '_' + language. E.g. board='TS SCERT', grade=5, subject='Maths', language='en' -> 'ts_scert_class5_maths_en'. If you already know a school's board/grade/subject, you can often construct this directly and skip listing books entirely.",
+    }
 
 
-@app.get("/published/books")
-async def list_published_books():
+@app.get("/published/books", response_model=list[BookSummary], summary="List published textbooks")
+async def list_published_books(
+    board: str | None = Query(None, description="Filter by board (case-insensitive, partial match allowed), e.g. 'TS SCERT'."),
+    grade: str | None = Query(None, description="Filter by exact grade, e.g. '5'."),
+    subject: str | None = Query(None, description="Filter by subject (case-insensitive, partial match allowed), e.g. 'Maths'."),
+    language: str | None = Query(None, description="Filter by exact language code, e.g. 'en'."),
+):
     """chapter_count on the book row is the TOTAL the pipeline detected in
     the PDF, set once up front -- it does NOT track how many chapters have
     actually been published so far. Since chapters now publish one at a
@@ -141,10 +207,27 @@ async def list_published_books():
     stopped or is still mid-run can genuinely have fewer real chapters than
     that number. total_chapters/chapters_published here are reported
     separately and honestly, computed live from the real chapter rows,
-    instead of presenting a partially-ingested book as if it were complete."""
+    instead of presenting a partially-ingested book as if it were complete.
+
+    With no filters, returns the entire catalog -- fine today with a
+    handful of books, but a caller that already knows what it wants should
+    prefer filtering (or constructing book_id directly, see the root
+    endpoint) rather than fetching everything and filtering client-side,
+    since this list only grows over time."""
+    filters = {}
+    if board:
+        filters["board"] = f"ilike.*{board}*"
+    if grade:
+        filters["grade"] = f"eq.{grade}"
+    if subject:
+        filters["subject"] = f"ilike.*{subject}*"
+    if language:
+        filters["language"] = f"eq.{language}"
+
     books = _sb_get(
         "textbook_books",
         select="id,book_id,board,grade,subject,language,chapter_count",
+        **filters,
     )
     for b in books:
         published = _sb_count("textbook_chapters", book_uuid=f"eq.{b['id']}")
@@ -154,7 +237,7 @@ async def list_published_books():
     return books
 
 
-@app.get("/published/books/{book_id}/chapters")
+@app.get("/published/books/{book_id}/chapters", response_model=list[ChapterSummary], summary="List a book's published chapters")
 async def list_published_chapters(book_id: str):
     books = _sb_get("textbook_books", book_id=f"eq.{book_id}", select="id")
     if not books:
@@ -170,7 +253,7 @@ async def list_published_chapters(book_id: str):
     )
 
 
-@app.get("/published/books/{book_id}/chapters/{chapter_number}")
+@app.get("/published/books/{book_id}/chapters/{chapter_number}", response_model=ChapterContent, summary="Get one chapter's full content")
 async def get_published_chapter(book_id: str, chapter_number: int):
     """The served payload: content_markdown as-is (noise-free, compressed,
     <img id="..."> placeholders in place) plus each referenced image
