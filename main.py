@@ -80,6 +80,7 @@ class ChapterImage(BaseModel):
     order_index: int
     url: str | None = Field(None, description="Direct, fetchable image URL. Null when this figure has no saved file -- see 'usage' for what to do instead, not an error.")
     usage: str = Field(..., description="How to use this figure: 'direct' -- url is set, use the real image as-is. 'generate' -- no url; caption is safe to hand to an AI image generator as-is (purely visual, no exact text/labels to get wrong). 'draw' -- no url; caption should be given to a teacher to reproduce by hand (depends on exact text/labels/positions an image generator can't reliably render).")
+    relevance: str = Field(..., description="How central this figure is to the chapter it's in: 'core' -- directly illustrates a specific subtopic being taught. 'supporting' -- related to the chapter's subject but not tied to one specific subtopic. 'generic' -- could sit in almost any chapter, not meaningfully tied to what this one teaches.")
 
 
 class ChapterContent(BaseModel):
@@ -278,13 +279,14 @@ async def get_published_chapter(book_id: str, chapter_number: int):
     images = _sb_get(
         "textbook_images",
         chapter_uuid=f"eq.{chapter['id']}",
-        select="image_id,caption,drive_file_id,storage_path,order_index,usage",
+        select="image_id,caption,drive_file_id,storage_path,order_index,usage,relevance",
         order="order_index",
     )
     for img in images:
         img["url"] = _resolve_image_url(img)
         img["caption"] = img.get("caption") or ""  # real rows from older ingestion runs can have this NULL
         img["usage"] = img.get("usage") or "direct"  # rows from before this field existed
+        img["relevance"] = img.get("relevance") or "supporting"  # rows from before this field existed
         img.pop("drive_file_id", None)
         img.pop("storage_path", None)
 
